@@ -120,7 +120,17 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
 
       let min_cost vertex acc = match Some vertex, acc with
 
-        | Some (((REG_Tmp _) as reg1) as v1), Some (((REG_Tmp _) as reg2) as v2) ->
+        | Some v1, Some v2 ->
+          let v1_out = float_of_int @@ RegGraph.out_degree infg v1 in
+          let v2_out = float_of_int @@ RegGraph.out_degree infg v2 in
+          let v1_cost = float_of_int @@ Hashtbl.find spill_costs v1 in
+          let v2_cost = float_of_int @@ Hashtbl.find spill_costs v2 in
+          if v1_cost/.v1_out > v2_cost/.v2_out then Some v2 else Some v1
+
+        | v, None -> v
+        | None, v -> v
+
+        (* | Some (((REG_Tmp _) as reg1) as v1), Some (((REG_Tmp _) as reg2) as v2) ->
           let v1_out = float_of_int @@ RegGraph.out_degree infg v1 in
           let v2_out = float_of_int @@ RegGraph.out_degree infg v2 in
           let v1_cost = float_of_int @@ Hashtbl.find spill_costs reg1 in
@@ -129,7 +139,7 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
 
         | Some (REG_Tmp _), _ -> Some vertex
         | _, Some (REG_Tmp _) -> Some vertex
-        | _ -> None
+        | _ -> None *)
 
       in
 
@@ -165,11 +175,19 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
         RegGraph.add_vertex infg v;
         List.iter (fun e -> RegGraph.add_edge_e infg e) egde_list;
 
-        let add_pair reg acc = 
-          let col = Hashtbl.find register2color_assignment reg in
-          (col, reg)::acc
+      (*   let add_pair reg acc = 
+          match Hashtbl.find_opt register2color_assignment reg with
+          | Some col -> 
+            (col, reg)::acc
+          | None -> failwith "internal error :|" *)
+        let find_color succ = 
+          match Hashtbl.find_opt register2color_assignment succ with
+          | Some col -> (col, succ)
+          | _ -> failwith "internal error :|"
+
         in
-        let succ_reg_col_pair_list = RegGraph.fold_vertex add_pair infg [] in
+        let succ_reg_col_pair_list = List.map find_color (RegGraph.succ infg v) in
+        (* let succ_reg_col_pair_list = RegGraph.fold_vertex add_pair infg [] in *)
         let succ_reg_col_pair_list = List.sort (fun p1 p2 -> compare p1 p2) succ_reg_col_pair_list in
 
         let rec select_color i = function
@@ -227,7 +245,9 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
 
     let build_register_assignment () =
       let register_assignment : (reg, reg) Hashtbl.t = Hashtbl.create 513 in 
-      Hashtbl.iter (fun reg col -> Hashtbl.add register_assignment reg (REG_Hard (col+1))) register2color_assignment;
+      (* Hashtbl.iter (fun reg col -> Hashtbl.add register_assignment reg (REG_Hard (col+1))) register2color_assignment; *)
+      Hashtbl.iter (fun reg col -> Hashtbl.add register_assignment reg ((Hashtbl.find color2register_assignment col))) register2color_assignment;
+
       (* Przejdz tablice register2color_assignment i uzupełnij prawidłowo
        * tablicę register_assignment *)
       register_assignment
