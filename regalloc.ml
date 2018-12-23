@@ -16,7 +16,7 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
     module Coalescencing = Toolbox.RegisterCoalescing
 
     (* Dostępne rejestry *)
-    let available_registers = Toolbox.RegistersDescription.available_registers
+    let available_registers = Toolbox.RegistersDescription.available_registers |> List.sort compare
 
     (* Liczba dostępnych kolorów *)
     let number_of_available_registers = List.length available_registers
@@ -108,51 +108,43 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
 
 
     let rec simplify infg num_of_reg stack spill_costs = 
-
+      let get_cost v = match v with
+        | REG_Hard _
+        | REG_Spec _-> max_int
+        | REG_Tmp i -> RegGraph.out_degree infg v
+      in
       let min_out_deg vertex acc = match Some vertex, acc with
         | v, None -> v
         | None, v -> v
         | Some v1, Some v2 -> 
-          let v1_out = RegGraph.out_degree infg v1 in
-          let v2_out = RegGraph.out_degree infg v2 in
-          if v2_out < v1_out then Some v2 else Some v1
+          if get_cost v2 < get_cost v1 then Some v2 else Some v1
       in
-
-      let min_cost vertex acc = match Some vertex, acc with
-
-        | Some v1, Some v2 ->
-          let v1_out = float_of_int @@ RegGraph.out_degree infg v1 in
-          let v2_out = float_of_int @@ RegGraph.out_degree infg v2 in
-          let v1_cost = float_of_int @@ Hashtbl.find spill_costs v1 in
-          let v2_cost = float_of_int @@ Hashtbl.find spill_costs v2 in
-          if v1_cost/.v1_out > v2_cost/.v2_out then Some v2 else Some v1
-
-        | v, None -> v
-        | None, v -> v
-
-        (* | Some (((REG_Tmp _) as reg1) as v1), Some (((REG_Tmp _) as reg2) as v2) ->
-          let v1_out = float_of_int @@ RegGraph.out_degree infg v1 in
-          let v2_out = float_of_int @@ RegGraph.out_degree infg v2 in
-          let v1_cost = float_of_int @@ Hashtbl.find spill_costs reg1 in
-          let v2_cost = float_of_int @@ Hashtbl.find spill_costs reg2 in
-          if v1_cost/.v1_out > v2_cost/.v2_out then Some v2 else Some v1
-
-        | Some (REG_Tmp _), _ -> Some vertex
-        | _, Some (REG_Tmp _) -> Some vertex
-        | _ -> None *)
+      let get_spill_cost v = match v with
+        | REG_Hard _
+        | REG_Spec _-> max_float
+        | REG_Tmp i -> 
+          let x = float_of_int @@ RegGraph.out_degree infg v in
+          let y = float_of_int @@ Hashtbl.find spill_costs v in
+          y /. x
+      in
+      let min_cost vertex acc = match vertex, acc with
+        | v1, Some v2 ->
+          if get_spill_cost v1 > get_spill_cost v2 then Some v2 else Some v1
+          
+        | v, None -> Some v
 
       in
 
       match RegGraph.fold_vertex min_out_deg infg None with
         | Some ((REG_Tmp _) as v) -> 
-          if RegGraph.out_degree infg v <= num_of_reg 
+          if RegGraph.out_degree infg v < num_of_reg 
             then
-              let new_stack = (v, RegGraph.succ_e infg v)::stack in
+              let new_stack = (v, RegGraph.succ infg v)::stack in
               RegGraph.remove_vertex infg v;
               simplify infg num_of_reg new_stack spill_costs
           else begin match RegGraph.fold_vertex min_cost infg None with
             | Some ((REG_Tmp _) as v) -> 
-              let new_stack = (v, RegGraph.succ_e infg v)::stack in
+              let new_stack = (v, RegGraph.succ infg v)::stack in
               RegGraph.remove_vertex infg v;
               simplify infg num_of_reg new_stack spill_costs
 
@@ -162,37 +154,49 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
 
         | _ -> stack 
 
+(*     let print_reg reg = match reg with
+          | REG_Hard i
+          | REG_Spec i ->
+            print_endline @@ "hs: " ^ string_of_int i
+          | REG_Tmp i ->
+            print_endline @@ " tmp: " ^  string_of_int i *)
 
     (* ------------------------------------------------------------------------
      *  Faza Select
      *)
+     
 
     let rec select infg num_of_reg stack actual_spills = 
       match stack with
       | [] -> actual_spills
-      | (v, egde_list)::tail -> 
-
-        RegGraph.add_vertex infg v;
-        List.iter (fun e -> RegGraph.add_edge_e infg e) egde_list;
-
-      (*   let add_pair reg acc = 
-          match Hashtbl.find_opt register2color_assignment reg with
-          | Some col -> 
-            (col, reg)::acc
-          | None -> failwith "internal error :|" *)
+      | (v, neighbours)::tail -> 
+(*         List.iter print_reg neighbours;
+        Hashtbl.iter (fun reg color -> match reg with
+          | REG_Hard i
+          | REG_Spec i ->
+            print_endline @@ string_of_int i ^ " hs " ^ string_of_int color
+          | REG_Tmp i ->
+            print_endline @@ string_of_int i ^ " " ^ string_of_int color ) register2color_assignment; *)
         let find_color succ = 
           match Hashtbl.find_opt register2color_assignment succ with
           | Some col -> (col, succ)
-          | _ -> failwith "internal error :|"
+          | _ -> begin match succ with 
+            | REG_Tmp _ -> failwith "internal error" 
+            | _ -> begin match Hashtbl.find_opt base_register2color_assignment succ with
+              | Some col -> (col, succ)
+              | _ -> failwith "internal error"
+            end
+          end
 
         in
-        let succ_reg_col_pair_list = List.map find_color (RegGraph.succ infg v) in
+        (* let succ_reg_col_pair_list = List.map find_color (RegGraph.succ infg v) in *)
+        let succ_reg_col_pair_list = List.map find_color neighbours in
         (* let succ_reg_col_pair_list = RegGraph.fold_vertex add_pair infg [] in *)
         let succ_reg_col_pair_list = List.sort (fun p1 p2 -> compare p1 p2) succ_reg_col_pair_list in
 
         let rec select_color i = function
         | [] -> i
-        | (col, _)::tail -> if i < col then i else select_color (i+1) tail
+        | (col, _)::tail -> if i < col then i else select_color (col+1) tail
         in
 
         let color = select_color 0 succ_reg_col_pair_list in
@@ -245,8 +249,8 @@ module Make(Toolbox:Iface.COMPILER_TOOLBOX) = struct
 
     let build_register_assignment () =
       let register_assignment : (reg, reg) Hashtbl.t = Hashtbl.create 513 in 
-      (* Hashtbl.iter (fun reg col -> Hashtbl.add register_assignment reg (REG_Hard (col+1))) register2color_assignment; *)
-      Hashtbl.iter (fun reg col -> Hashtbl.add register_assignment reg ((Hashtbl.find color2register_assignment col))) register2color_assignment;
+      Hashtbl.iter (fun reg col -> Hashtbl.add register_assignment reg (REG_Hard (col+1))) register2color_assignment;
+      (* Hashtbl.iter (fun reg col -> Hashtbl.add register_assignment reg ((Hashtbl.find color2register_assignment col))) register2color_assignment; *)
 
       (* Przejdz tablice register2color_assignment i uzupełnij prawidłowo
        * tablicę register_assignment *)
